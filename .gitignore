@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+# Virtual env
+.venv/
+venv/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS/editor
+.DS_Store
+.vscode/
+
+# Data / outputs (keep repo light)
+data/**
+!data/.gitkeep
+
+reports/**
+!reports/figures/
+!reports/figures/**
+
+# Logs
+*.log
