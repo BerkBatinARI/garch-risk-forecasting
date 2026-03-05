@@ -27,6 +27,9 @@ data/**
 reports/**
 !reports/figures/
 !reports/figures/**
+!reports/tables/
+!reports/tables/**
 
 # Logs
 *.log
+
