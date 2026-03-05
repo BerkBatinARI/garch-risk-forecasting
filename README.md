@@ -2,7 +2,7 @@
 
 A reproducible **portfolio risk forecasting** project that compares:
 
-- **HS (Historical Simulation)** VaR/ES  
+- **HS (Historical Simulation)** VaR/ES
 - **FHS (Filtered Historical Simulation)** VaR/ES using **time-varying volatility** (EWMA / RiskMetrics-style “GARCH-like” volatility)
 
 The goal is a realistic quant workflow: **data → returns → volatility model → Monte Carlo / resampling → VaR backtesting → plots**.
@@ -16,19 +16,6 @@ The goal is a realistic quant workflow: **data → returns → volatility model 
 - `notebooks/` — optional exploration (not required to reproduce results)
 - `reports/` — generated outputs (ignored by git)
 - `reports/figures/` — **tracked** key plots embedded in this README
-
----
-
-## What this project does
-
-- Downloads daily price data (SPY, TLT, GLD) from Stooq (no API key)
-- Builds a simple portfolio (60% SPY, 30% TLT, 10% GLD)
-- Forecasts **1-day VaR at 97.5%** using:
-  - **HS:** quantile of historical returns
-  - **FHS:** standardise returns by volatility, resample shocks, scale by next-day volatility
-- Walk-forward backtest and produces:
-  - Realised P&L vs VaR thresholds
-  - Rolling breach rate vs expected breach rate
 
 ---
 
