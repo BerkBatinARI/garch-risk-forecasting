@@ -52,7 +52,7 @@ FHS is closer to the expected breach rate because it adapts to volatility cluste
 ---
 
 ## Reproduce locally
-Or run everything in one go: \python src/run_all.py``
+
 ### 1) Create venv + install deps
 
 ```bash
