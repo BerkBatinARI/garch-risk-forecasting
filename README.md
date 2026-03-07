@@ -32,14 +32,37 @@ The goal is a realistic quant workflow: **data → returns → volatility model 
 
 ---
 
-## Results (from a sample run)
 
-Example output:
 
-- **HS breach rate:** ~2.73% (expected 2.50%)
-- **FHS breach rate:** ~2.45% (expected 2.50%)
+## Results (latest run)
 
-FHS is closer to the expected breach rate because it adapts to volatility clustering.
+Backtest setup:
+- Portfolio: 60% SPY / 30% TLT / 10% GLD
+- 1-day risk at **97.5%** confidence (α = 0.975)
+- Walk-forward backtest sample size: **n = 4,537** days  
+- Expected breach rate: **1 − α = 2.50%**
+
+Empirical calibration:
+- **HS breaches:** 124 / 4,537 → **2.73%** (expected 2.50%)
+- **FHS breaches:** 111 / 4,537 → **2.45%** (expected 2.50%)
+
+FHS is closer to the expected breach rate because it adapts to volatility clustering via time-varying volatility scaling.
+
+Full numeric summary:
+- `reports/tables/backtest_summary.csv`
+
+### Key figures
+
+**Realised P&L vs VaR thresholds**
+![P&L vs VaR](reports/figures/pnl_vs_var.png)
+
+**Realised P&L vs VaR and ES thresholds**
+![P&L vs VaR and ES](reports/figures/pnl_vs_var_es.png)
+
+**Rolling VaR breach rate**
+![Rolling breach](reports/figures/rolling_breach_rate.png)
+
+
 
 ### Key figures
 
