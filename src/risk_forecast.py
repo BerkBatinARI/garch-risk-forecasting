@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from arch import arch_model
+
 
 DATA_DIR = Path("data")
 FIG_DIR = Path("reports/figures")
@@ -17,24 +19,22 @@ TABLE_DIR = Path("reports/tables")
 # ---------- utilities ----------
 def load_prices(ticker: str) -> pd.Series:
     path = DATA_DIR / f"{ticker}.csv"
-    df = pd.read_csv(path, parse_dates=["Date"])
-    df = df.sort_values("Date")
-    s = df.set_index("Date")["Close"].astype(float)
-    return s
+    df = pd.read_csv(path, parse_dates=["Date"]).sort_values("Date")
+    return df.set_index("Date")["Close"].astype(float)
 
 
 def log_returns(prices: pd.Series) -> pd.Series:
-    r = np.log(prices).diff()
-    return r.dropna()
+    return np.log(prices).diff().dropna()
 
 
 def ewma_vol(returns: np.ndarray, lam: float = 0.94) -> np.ndarray:
-    """
-    RiskMetrics-style EWMA volatility (proxy for GARCH in a lightweight project).
-    returns: daily log returns
-    """
+    """RiskMetrics-style EWMA volatility."""
     var = np.empty_like(returns)
-    var[0] = np.var(returns[:50]) if len(returns) >= 50 else np.var(returns)
+    if len(returns) >= 50:
+        var[0] = np.var(returns[:50])
+    else:
+        var[0] = np.var(returns)
+
     for t in range(1, len(returns)):
         var[t] = lam * var[t - 1] + (1 - lam) * returns[t - 1] ** 2
     return np.sqrt(np.maximum(var, 1e-18))
@@ -53,6 +53,24 @@ def var_es_from_pnl(pnl: np.ndarray, alpha: float) -> tuple[float, float]:
     return float(q), es
 
 
+def breach_rate(pnl: np.ndarray, var: np.ndarray) -> float:
+    # breach if loss > VaR  <=>  -pnl > var  <=>  pnl < -var
+    return float(np.mean(pnl < -var))
+
+
+def draw_std_student_t(rng: np.random.Generator, nu: float, size: int) -> np.ndarray:
+    """
+    Draw standardized Student-t shocks with E[z]=0, Var[z]=1.
+    For t ~ t_nu, Var[t] = nu/(nu-2) for nu>2.
+    """
+    nu = float(nu)
+    if not np.isfinite(nu) or nu <= 2.05:
+        # Safety fallback to avoid infinite/huge variance; use a conservative df.
+        nu = 8.0
+    t = rng.standard_t(df=nu, size=size)
+    return t / np.sqrt(nu / (nu - 2.0))
+
+
 # ---------- results container ----------
 @dataclass(frozen=True)
 class BacktestResult:
@@ -67,18 +85,65 @@ def historical_simulation(pnl_hist: np.ndarray, alpha: float) -> tuple[float, fl
     return var_es_from_pnl(pnl_hist, alpha)
 
 
-def filtered_historical_simulation(
-    returns_hist: np.ndarray, vol_hist: np.ndarray, vol_next: float, alpha: float
+def filtered_historical_simulation_mc(
+    rng: np.random.Generator,
+    returns_hist: np.ndarray,
+    vol_hist: np.ndarray,
+    vol_next: float,
+    alpha: float,
+    n_mc: int,
 ) -> tuple[float, float]:
     """
     FHS: standardise returns -> resample shocks -> scale by next-day vol.
     """
     z = returns_hist / np.maximum(vol_hist, 1e-12)
     z = z[np.isfinite(z)]
-    shocks = np.random.choice(z, size=len(z), replace=True)
-    r_next = vol_next * shocks
-    pnl = r_next  # assume $1 notional; scaling handled later if needed
-    return var_es_from_pnl(pnl, alpha)
+    shocks = rng.choice(z, size=n_mc, replace=True)
+    pnl_mc = vol_next * shocks
+    return var_es_from_pnl(pnl_mc, alpha)
+
+
+def garch_one_step_forecast_sigma_and_nu(
+    returns_hist: np.ndarray,
+) -> tuple[float, float]:
+    """
+    Fit GARCH(1,1) with Student-t innovations on returns_hist (mean=0),
+    return (sigma_next, nu).
+    """
+    # Mean=Zero keeps it simple and stable for daily returns.
+    am = arch_model(
+        returns_hist,
+        mean="Zero",
+        vol="GARCH",
+        p=1,
+        q=1,
+        dist="StudentsT",
+        rescale=False,
+    )
+    res = am.fit(disp="off")
+    # 1-step ahead forecast variance
+    f = res.forecast(horizon=1, reindex=False)
+    var_next = float(f.variance.values[-1, 0])
+    sigma_next = float(np.sqrt(max(var_next, 1e-18)))
+
+    nu = float(res.params.get("nu", np.nan))
+    return sigma_next, nu
+
+
+def monte_carlo_garch_t(
+    rng: np.random.Generator,
+    sigma_next: float,
+    nu: float,
+    alpha: float,
+    n_mc: int,
+) -> tuple[float, float]:
+    """
+    MC VaR/ES for next-day returns under Student-t innovations:
+      r_{t+1} = sigma_{t+1} * z,   z ~ standardized t_nu
+    """
+    z = draw_std_student_t(rng, nu=nu, size=n_mc)
+    pnl_mc = sigma_next * z
+    return var_es_from_pnl(pnl_mc, alpha)
 
 
 # ---------- pipeline ----------
@@ -87,18 +152,22 @@ def walk_forward_backtest(
     alpha: float = 0.975,
     window: int = 750,
     lam: float = 0.94,
-    n_mc: int = 20000,
+    n_mc_fhs: int = 20000,
+    n_mc_garch: int = 20000,
     seed: int = 42,
-) -> tuple[BacktestResult, BacktestResult]:
+    garch_refit_every: int = 5,
+) -> tuple[BacktestResult, BacktestResult, BacktestResult]:
     """
     Compare:
-      (A) Historical Simulation (HS)
-      (B) Filtered Historical Simulation (FHS) using EWMA vol
+      (A) HS
+      (B) FHS using EWMA vol (resampling standardized shocks)
+      (C) MC-GARCH(1,1) with Student-t innovations
 
-    We forecast next-day VaR/ES each day, then compare against realised P&L.
+    garch_refit_every:
+      Fit GARCH every k steps to avoid extremely slow runtimes.
+      Between refits, reuse last (sigma_next, nu). (Good practical compromise.)
     """
     rng = np.random.default_rng(seed)
-    np.random.seed(seed)  # keeps any legacy np.random usage reproducible
 
     r = returns.values.astype(float)
     dates = returns.index
@@ -106,84 +175,116 @@ def walk_forward_backtest(
     if len(r) <= window + 5:
         raise ValueError(f"Not enough data ({len(r)}) for window={window}.")
 
+    # Precompute EWMA vol for FHS
     vol = ewma_vol(r, lam=lam)
 
     hs_var, hs_es = [], []
     fhs_var, fhs_es = [], []
+    g_var, g_es = [], []
     realised = []
     out_dates = []
 
-    # t indexes the "forecast origin"; we forecast t+1 using info up to t
-    for t in range(window, len(r) - 1):
+    last_sigma_next = None
+    last_nu = None
+
+    for step, t in enumerate(range(window, len(r) - 1)):
         r_hist = r[t - window : t]
         vol_hist = vol[t - window : t]
-        vol_next = vol[t]  # using vol at time t to forecast t+1
+        vol_next = vol[t]  # EWMA sigma at time t for forecasting t+1
 
-        # realised next-day P&L (in return units)
-        pnl_realised = r[t + 1]
+        pnl_realised = r[t + 1]  # return units
 
-        # HS (on historical P&L distribution)
+        # HS
         var_hs, es_hs = historical_simulation(r_hist, alpha)
 
-        # FHS (Monte Carlo via resampling standardized shocks)
-        z = r_hist / np.maximum(vol_hist, 1e-12)
-        z = z[np.isfinite(z)]
-        shocks = rng.choice(z, size=n_mc, replace=True)
-        pnl_mc = vol_next * shocks
-        var_fhs, es_fhs = var_es_from_pnl(pnl_mc, alpha)
+        # FHS (EWMA-filtered, MC via resampling)
+        var_fhs, es_fhs = filtered_historical_simulation_mc(
+            rng=rng,
+            returns_hist=r_hist,
+            vol_hist=vol_hist,
+            vol_next=vol_next,
+            alpha=alpha,
+            n_mc=n_mc_fhs,
+        )
+
+        # MC-GARCH-t
+        do_refit = (step % max(int(garch_refit_every), 1) == 0) or (last_sigma_next is None)
+        if do_refit:
+            sigma_next, nu = garch_one_step_forecast_sigma_and_nu(r_hist)
+            last_sigma_next, last_nu = sigma_next, nu
+
+        var_g, es_g = monte_carlo_garch_t(
+            rng=rng,
+            sigma_next=float(last_sigma_next),
+            nu=float(last_nu),
+            alpha=alpha,
+            n_mc=n_mc_garch,
+        )
 
         hs_var.append(var_hs)
         hs_es.append(es_hs)
         fhs_var.append(var_fhs)
         fhs_es.append(es_fhs)
+        g_var.append(var_g)
+        g_es.append(es_g)
+
         realised.append(pnl_realised)
         out_dates.append(dates[t + 1])
 
     idx = pd.DatetimeIndex(out_dates)
-    hs = BacktestResult(idx, np.array(realised), np.array(hs_var), np.array(hs_es))
-    fhs = BacktestResult(idx, np.array(realised), np.array(fhs_var), np.array(fhs_es))
-    return hs, fhs
+    realised_arr = np.array(realised, dtype=float)
 
-
-def breach_rate(pnl: np.ndarray, var: np.ndarray) -> float:
-    # breach if loss > VaR  <=>  -pnl > var  <=>  pnl < -var
-    return float(np.mean(pnl < -var))
+    hs = BacktestResult(idx, realised_arr, np.array(hs_var), np.array(hs_es))
+    fhs = BacktestResult(idx, realised_arr, np.array(fhs_var), np.array(fhs_es))
+    garch_t = BacktestResult(idx, realised_arr, np.array(g_var), np.array(g_es))
+    return hs, fhs, garch_t
 
 
 def main() -> None:
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     TABLE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Simple portfolio: 60% SPY, 30% TLT, 10% GLD
+    # Portfolio: 60% SPY, 30% TLT, 10% GLD
     weights = {"SPY": 0.60, "TLT": 0.30, "GLD": 0.10}
 
     rets = []
-    for tkr, _w in weights.items():
+    for tkr in weights:
         p = load_prices(tkr)
-        r = log_returns(p).rename(tkr)
-        rets.append(r)
+        rets.append(log_returns(p).rename(tkr))
 
     df = pd.concat(rets, axis=1, join="inner").dropna()
     port_r = (df * pd.Series(weights)).sum(axis=1)
     port_r.name = "Portfolio"
 
     alpha = 0.975
-    hs, fhs = walk_forward_backtest(
-        port_r, alpha=alpha, window=750, lam=0.94, n_mc=20000, seed=42
+    window = 750
+
+    hs, fhs, garch_t = walk_forward_backtest(
+        port_r,
+        alpha=alpha,
+        window=window,
+        lam=0.94,
+        n_mc_fhs=20000,
+        n_mc_garch=20000,
+        seed=42,
+        garch_refit_every=5,  # speed-friendly; set to 1 for strict refit-daily
     )
 
     hs_br = breach_rate(hs.realised_pnl, hs.var)
     fhs_br = breach_rate(fhs.realised_pnl, fhs.var)
+    g_br = breach_rate(garch_t.realised_pnl, garch_t.var)
 
-    print("Backtest summary (1-day, return units, $1 notional):")
-    print(f"alpha={alpha:.3f} window=750 n_obs={len(hs.dates)}")
-    print(f"HS  breach_rate = {hs_br:.4f} (expected ~ {1 - alpha:.4f})")
-    print(f"FHS breach_rate = {fhs_br:.4f} (expected ~ {1 - alpha:.4f})")
-
-    # ---------- Table: summary CSV ----------
     n_obs = len(hs.dates)
     expected = (1 - alpha) * n_obs
 
+    print("Backtest summary (1-day, return units, $1 notional):")
+    print(f"alpha={alpha:.3f} window={window} n_obs={n_obs}")
+    print(f"Expected breach rate ~ {1 - alpha:.4f}")
+    print(f"HS         breach_rate = {hs_br:.4f}")
+    print(f"FHS (EWMA)  breach_rate = {fhs_br:.4f}")
+    print(f"MC_GARCH_T  breach_rate = {g_br:.4f}")
+
+    # ---------- Table: summary CSV ----------
     summary = pd.DataFrame(
         [
             {
@@ -206,6 +307,16 @@ def main() -> None:
                 "avg_var": float(fhs.var.mean()),
                 "avg_es": float(fhs.es.mean()),
             },
+            {
+                "model": "MC_GARCH_T",
+                "alpha": alpha,
+                "n_obs": n_obs,
+                "breaches": int((garch_t.realised_pnl < -garch_t.var).sum()),
+                "breach_rate": float(g_br),
+                "expected_breaches": float(expected),
+                "avg_var": float(garch_t.var.mean()),
+                "avg_es": float(garch_t.es.mean()),
+            },
         ]
     )
 
@@ -216,9 +327,10 @@ def main() -> None:
     # ---------- Figure 1: realised P&L vs -VaR ----------
     plt.figure()
     plt.plot(hs.dates, hs.realised_pnl, label="Realised P&L (return)")
-    plt.plot(hs.dates, -hs.var, label="HS VaR threshold (-VaR)")
-    plt.plot(fhs.dates, -fhs.var, label="FHS VaR threshold (-VaR)")
-    plt.title("1-day Portfolio P&L vs VaR Threshold (HS vs FHS)")
+    plt.plot(hs.dates, -hs.var, label="HS (-VaR)")
+    plt.plot(fhs.dates, -fhs.var, label="FHS (-VaR)")
+    plt.plot(garch_t.dates, -garch_t.var, label="MC_GARCH_T (-VaR)")
+    plt.title("1-day Portfolio P&L vs VaR Threshold (HS vs FHS vs MC-GARCH-t)")
     plt.xlabel("Date")
     plt.ylabel("Return")
     plt.legend()
@@ -235,7 +347,9 @@ def main() -> None:
     plt.plot(hs.dates, -hs.es, label="HS (-ES)")
     plt.plot(fhs.dates, -fhs.var, label="FHS (-VaR)")
     plt.plot(fhs.dates, -fhs.es, label="FHS (-ES)")
-    plt.title("1-day Portfolio P&L vs VaR/ES Thresholds (HS vs FHS)")
+    plt.plot(garch_t.dates, -garch_t.var, label="MC_GARCH_T (-VaR)")
+    plt.plot(garch_t.dates, -garch_t.es, label="MC_GARCH_T (-ES)")
+    plt.title("1-day Portfolio P&L vs VaR/ES Thresholds")
     plt.xlabel("Date")
     plt.ylabel("Return")
     plt.legend()
@@ -247,6 +361,7 @@ def main() -> None:
 
     # ---------- Figure 2: rolling breach rate ----------
     roll = 250
+
     hs_b = (
         (pd.Series(hs.realised_pnl, index=hs.dates) < -pd.Series(hs.var, index=hs.dates))
         .astype(int)
@@ -260,13 +375,23 @@ def main() -> None:
         .astype(int)
         .rename("FHS_breach")
     )
+    g_b = (
+        (
+            pd.Series(garch_t.realised_pnl, index=garch_t.dates)
+            < -pd.Series(garch_t.var, index=garch_t.dates)
+        )
+        .astype(int)
+        .rename("MC_GARCH_T_breach")
+    )
 
     hs_roll = hs_b.rolling(roll).mean()
     fhs_roll = fhs_b.rolling(roll).mean()
+    g_roll = g_b.rolling(roll).mean()
 
     plt.figure()
     plt.plot(hs_roll.index, hs_roll.values, label=f"HS rolling breach rate ({roll}d)")
     plt.plot(fhs_roll.index, fhs_roll.values, label=f"FHS rolling breach rate ({roll}d)")
+    plt.plot(g_roll.index, g_roll.values, label=f"MC_GARCH_T rolling breach rate ({roll}d)")
     plt.axhline(1 - alpha, linestyle="--", label="Expected")
     plt.title("Rolling VaR Breach Rate")
     plt.xlabel("Date")
