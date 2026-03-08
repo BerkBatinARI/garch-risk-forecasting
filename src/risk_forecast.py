@@ -120,7 +120,7 @@ def garch_one_step_forecast_sigma_and_nu(
         dist="StudentsT",
         rescale=False,
     )
-    res = am.fit(disp="off")
+    res = am.fit(disp="off", options={"maxiter": 2000})
     # 1-step ahead forecast variance
     f = res.forecast(horizon=1, reindex=False)
     var_next = float(f.variance.values[-1, 0])
