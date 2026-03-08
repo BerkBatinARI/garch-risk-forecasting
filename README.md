@@ -39,17 +39,26 @@ The goal is a realistic quant workflow: **data → returns → volatility model 
 Backtest setup:
 - Portfolio: 60% SPY / 30% TLT / 10% GLD
 - 1-day risk at **97.5%** confidence (α = 0.975)
-- Walk-forward backtest sample size: **n = 4,537** days  
+- Walk-forward backtest sample size: **n = 4,537** days
 - Expected breach rate: **1 − α = 2.50%**
 
-Empirical calibration:
-- **HS breaches:** 124 / 4,537 → **2.73%** (expected 2.50%)
-- **FHS breaches:** 111 / 4,537 → **2.45%** (expected 2.50%)
+Empirical calibration (VaR exceptions):
+- **HS breach rate:** **2.73%** (expected 2.50%)
+- **FHS (EWMA) breach rate:** **2.49%** (closest to expected)
+- **MC-GARCH(1,1)-t breach rate:** **2.78%**
 
-FHS is closer to the expected breach rate because it adapts to volatility clustering via time-varying volatility scaling.
+In this dataset, **FHS (EWMA)** is best calibrated to the target exception rate, while **MC-GARCH-t** produces a slightly higher exception rate.
 
 Full numeric summary:
 - `reports/tables/backtest_summary.csv`
+
+### Key figures
+
+![P&L vs VaR](reports/figures/pnl_vs_var.png)
+
+![P&L vs VaR and ES](reports/figures/pnl_vs_var_es.png)
+
+![Rolling breach](reports/figures/rolling_breach_rate.png)
 
 ### Key figures
 
