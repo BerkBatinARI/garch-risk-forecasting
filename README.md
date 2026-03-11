@@ -41,34 +41,34 @@ Goal: a realistic quant workflow: **data → returns → volatility model → Mo
 Backtest setup:
 - Portfolio: 60% SPY / 30% TLT / 10% GLD
 - 1-day risk at **97.5%** confidence (α = 0.975)
-- Walk-forward backtest sample size: **n = 4,537** days
+- Walk-forward backtest sample size: **~4.5k trading days** (depends on latest Stooq data)
 - Expected breach rate: **1 − α = 2.50%**
 
 Empirical calibration (VaR exceptions):
-- **HS breach rate:** **2.73%** (expected 2.50%)
-- **FHS (EWMA) breach rate:** **2.49%** (closest to expected)
-- **MC-GARCH(1,1)-t breach rate:** **2.78%**
+- **HS:** 124 breaches / 4540 → **2.73%**
+- **FHS (EWMA):** 113 breaches / 4540 → **2.49%** (closest to expected)
+- **MC-GARCH(1,1)-t:** 126 breaches / 4540 → **2.78%**
+
+Average risk levels (return units):
+- **Avg VaR:** HS 0.01411 | FHS 0.01418 | MC-GARCH-t 0.01282  
+- **Avg ES:**  HS 0.02078 | FHS 0.01915 | MC-GARCH-t 0.01650
 
 Full numeric summaries:
 - `reports/tables/backtest_summary.csv`
 - `reports/tables/var_backtests.csv`
 
----
+### VaR backtesting (Kupiec & Christoffersen)
 
-## VaR backtesting (Kupiec & Christoffersen)
+We report likelihood-ratio tests (p-values in `reports/tables/var_backtests.csv`):
 
-Formal likelihood-ratio tests (p-values in `reports/tables/var_backtests.csv`):
-
-- **Kupiec LR_uc (unconditional coverage):** tests whether the exception rate matches the target \(1-\alpha\).
-- **Christoffersen LR_ind (independence):** tests whether exceptions are independent over time (no clustering).
-- **Conditional coverage LR_cc:** joint test of coverage + independence (LR_cc = LR_uc + LR_ind).
+- **Kupiec LR_uc (unconditional coverage):** exception rate matches target \(1-\alpha\).
+- **Christoffersen LR_ind (independence):** exceptions are independent over time (no clustering).
+- **LR_cc (conditional coverage):** joint test (LR_cc = LR_uc + LR_ind).
 
 At the 5% level (**p < 0.05 ⇒ reject**):
-- All models pass **unconditional coverage** (FHS is strongest).
-- All models reject **independence**, indicating exception clustering.
-- HS fails **conditional coverage** most strongly; FHS and MC-GARCH-t improve but still reject conditional coverage.
-
----
+- All models pass **unconditional coverage** (p_uc > 0.05).
+- All models reject **independence** (p_ind < 0.05), meaning exceptions cluster.
+- HS fails **conditional coverage** most strongly; FHS and MC-GARCH-t improve but still reject LR_cc.
 
 ## Key figures
 
