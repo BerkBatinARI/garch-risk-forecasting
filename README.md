@@ -38,6 +38,8 @@ Goal: a realistic quant workflow: **data → returns → volatility model → Mo
 
 ## Results (latest run)
 
+Results depend slightly on the latest Stooq data snapshot.
+
 Backtest setup:
 - Portfolio: 60% SPY / 30% TLT / 10% GLD
 - 1-day risk at **97.5%** confidence (α = 0.975)
@@ -72,6 +74,8 @@ At the 5% level (**p < 0.05 ⇒ reject**):
 
 ## Key figures
 
+Plots compare HS, FHS (EWMA), and MC-GARCH(1,1)-t thresholds against realised 1-day portfolio returns.
+
 **Realised P&L vs VaR thresholds**
 ![P&L vs VaR](reports/figures/pnl_vs_var.png)
 
@@ -92,3 +96,4 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+```
