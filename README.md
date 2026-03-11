@@ -1,4 +1,5 @@
-# GARCH Risk Forecasting (VaR/ES) — HS vs FHS vs MC-GARCH-t
+# VaR/ES Risk Forecasting
+### HS vs FHS vs GARCH-t
 
 A reproducible **portfolio risk forecasting** project that compares:
 
