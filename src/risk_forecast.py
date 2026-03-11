@@ -9,6 +9,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from arch import arch_model
+from scipy.stats import chi2
 
 
 DATA_DIR = Path("data")
@@ -71,6 +72,87 @@ def draw_std_student_t(rng: np.random.Generator, nu: float, size: int) -> np.nda
     return t / np.sqrt(nu / (nu - 2.0))
 
 
+# ---------- VaR backtests (Kupiec + Christoffersen) ----------
+def _safe_log(x: float) -> float:
+    return float(np.log(max(x, 1e-16)))
+
+
+def kupiec_lr_uc(breaches: np.ndarray, alpha: float) -> tuple[float, float]:
+    """
+    Kupiec unconditional coverage test.
+    breaches: array of 0/1 indicating VaR exceptions (1 = exception).
+    alpha: VaR confidence level (e.g., 0.975). Exception prob p = 1 - alpha.
+    Returns (LR_uc, p_value) with df=1.
+    """
+    x = int(breaches.sum())
+    n = int(len(breaches))
+    p = 1.0 - float(alpha)
+
+    if n == 0:
+        return np.nan, np.nan
+
+    phat = x / n
+
+    lnL0 = (n - x) * _safe_log(1 - p) + x * _safe_log(p)
+    lnL1 = (n - x) * _safe_log(1 - phat) + x * _safe_log(phat)
+
+    lr_uc = -2.0 * (lnL0 - lnL1)
+    pval = 1.0 - float(chi2.cdf(lr_uc, df=1))
+    return float(lr_uc), float(pval)
+
+
+def christoffersen_lr_ind(breaches: np.ndarray) -> tuple[float, float]:
+    """
+    Christoffersen independence test.
+    breaches: array of 0/1 indicating exceptions.
+    Returns (LR_ind, p_value) with df=1.
+    """
+    b = breaches.astype(int)
+    if len(b) < 2:
+        return np.nan, np.nan
+
+    n00 = int(((b[:-1] == 0) & (b[1:] == 0)).sum())
+    n01 = int(((b[:-1] == 0) & (b[1:] == 1)).sum())
+    n10 = int(((b[:-1] == 1) & (b[1:] == 0)).sum())
+    n11 = int(((b[:-1] == 1) & (b[1:] == 1)).sum())
+
+    denom0 = n00 + n01
+    denom1 = n10 + n11
+
+    pi01 = n01 / denom0 if denom0 > 0 else 0.0
+    pi11 = n11 / denom1 if denom1 > 0 else 0.0
+
+    pi1 = (n01 + n11) / (n00 + n01 + n10 + n11)
+
+    lnL0 = (n00 + n10) * _safe_log(1 - pi1) + (n01 + n11) * _safe_log(pi1)
+    lnL1 = (
+        n00 * _safe_log(1 - pi01)
+        + n01 * _safe_log(pi01)
+        + n10 * _safe_log(1 - pi11)
+        + n11 * _safe_log(pi11)
+    )
+
+    lr_ind = -2.0 * (lnL0 - lnL1)
+    pval = 1.0 - float(chi2.cdf(lr_ind, df=1))
+    return float(lr_ind), float(pval)
+
+
+def christoffersen_lr_cc(breaches: np.ndarray, alpha: float) -> tuple[float, float]:
+    """
+    Christoffersen conditional coverage test: LR_cc = LR_uc + LR_ind (df=2)
+    Returns (LR_cc, p_value).
+    """
+    lr_uc, _ = kupiec_lr_uc(breaches, alpha)
+    lr_ind, _ = christoffersen_lr_ind(breaches)
+
+    if not np.isfinite(lr_uc) or not np.isfinite(lr_ind):
+        return np.nan, np.nan
+
+    lr_cc = float(lr_uc + lr_ind)
+    pval = 1.0 - float(chi2.cdf(lr_cc, df=2))
+    return lr_cc, float(pval)
+
+
 # ---------- results container ----------
 @dataclass(frozen=True)
 class BacktestResult:
@@ -110,7 +192,6 @@ def garch_one_step_forecast_sigma_and_nu(
     Fit GARCH(1,1) with Student-t innovations on returns_hist (mean=0),
     return (sigma_next, nu).
     """
-    # Mean=Zero keeps it simple and stable for daily returns.
     am = arch_model(
         returns_hist,
         mean="Zero",
@@ -120,8 +201,9 @@ def garch_one_step_forecast_sigma_and_nu(
         dist="StudentsT",
         rescale=False,
     )
+    # Increased optimizer iterations to reduce convergence warnings.
     res = am.fit(disp="off", options={"maxiter": 2000})
-    # 1-step ahead forecast variance
+
     f = res.forecast(horizon=1, reindex=False)
     var_next = float(f.variance.values[-1, 0])
     sigma_next = float(np.sqrt(max(var_next, 1e-18)))
@@ -165,7 +247,7 @@ def walk_forward_backtest(
 
     garch_refit_every:
       Fit GARCH every k steps to avoid extremely slow runtimes.
-      Between refits, reuse last (sigma_next, nu). (Good practical compromise.)
+      Between refits, reuse last (sigma_next, nu).
     """
     rng = np.random.default_rng(seed)
 
@@ -175,7 +257,6 @@ def walk_forward_backtest(
     if len(r) <= window + 5:
         raise ValueError(f"Not enough data ({len(r)}) for window={window}.")
 
-    # Precompute EWMA vol for FHS
     vol = ewma_vol(r, lam=lam)
 
     hs_var, hs_es = [], []
@@ -190,14 +271,12 @@ def walk_forward_backtest(
     for step, t in enumerate(range(window, len(r) - 1)):
         r_hist = r[t - window : t]
         vol_hist = vol[t - window : t]
-        vol_next = vol[t]  # EWMA sigma at time t for forecasting t+1
+        vol_next = vol[t]
 
-        pnl_realised = r[t + 1]  # return units
+        pnl_realised = r[t + 1]
 
-        # HS
         var_hs, es_hs = historical_simulation(r_hist, alpha)
 
-        # FHS (EWMA-filtered, MC via resampling)
         var_fhs, es_fhs = filtered_historical_simulation_mc(
             rng=rng,
             returns_hist=r_hist,
@@ -207,8 +286,9 @@ def walk_forward_backtest(
             n_mc=n_mc_fhs,
         )
 
-        # MC-GARCH-t
-        do_refit = (step % max(int(garch_refit_every), 1) == 0) or (last_sigma_next is None)
+        do_refit = (step % max(int(garch_refit_every), 1) == 0) or (
+            last_sigma_next is None
+        )
         if do_refit:
             sigma_next, nu = garch_one_step_forecast_sigma_and_nu(r_hist)
             last_sigma_next, last_nu = sigma_next, nu
@@ -244,7 +324,6 @@ def main() -> None:
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     TABLE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Portfolio: 60% SPY, 30% TLT, 10% GLD
     weights = {"SPY": 0.60, "TLT": 0.30, "GLD": 0.10}
 
     rets = []
@@ -267,7 +346,7 @@ def main() -> None:
         n_mc_fhs=20000,
         n_mc_garch=20000,
         seed=42,
-        garch_refit_every=5,  # speed-friendly; set to 1 for strict refit-daily
+        garch_refit_every=5,
     )
 
     hs_br = breach_rate(hs.realised_pnl, hs.var)
@@ -323,6 +402,37 @@ def main() -> None:
     out_csv = TABLE_DIR / "backtest_summary.csv"
     summary.to_csv(out_csv, index=False)
     print(f"Saved {out_csv}")
+
+    # ---------- VaR backtests: Kupiec + Christoffersen ----------
+    hs_breaches = (hs.realised_pnl < -hs.var).astype(int)
+    fhs_breaches = (fhs.realised_pnl < -fhs.var).astype(int)
+    g_breaches = (garch_t.realised_pnl < -garch_t.var).astype(int)
+
+    def _tests_row(name: str, b: np.ndarray) -> dict:
+        lr_uc, p_uc = kupiec_lr_uc(b, alpha)
+        lr_ind, p_ind = christoffersen_lr_ind(b)
+        lr_cc, p_cc = christoffersen_lr_cc(b, alpha)
+        return {
+            "model": name,
+            "LR_uc": lr_uc,
+            "p_uc": p_uc,
+            "LR_ind": lr_ind,
+            "p_ind": p_ind,
+            "LR_cc": lr_cc,
+            "p_cc": p_cc,
+        }
+
+    tests = pd.DataFrame(
+        [
+            _tests_row("HS", hs_breaches),
+            _tests_row("FHS", fhs_breaches),
+            _tests_row("MC_GARCH_T", g_breaches),
+        ]
+    )
+
+    out_tests = TABLE_DIR / "var_backtests.csv"
+    tests.to_csv(out_tests, index=False)
+    print(f"Saved {out_tests}")
 
     # ---------- Figure 1: realised P&L vs -VaR ----------
     plt.figure()
