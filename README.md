@@ -1,11 +1,12 @@
-# GARCH Risk Forecasting (VaR/ES) — Filtered Historical Simulation
+# GARCH Risk Forecasting (VaR/ES) — HS vs FHS vs MC-GARCH-t
 
 A reproducible **portfolio risk forecasting** project that compares:
 
 - **HS (Historical Simulation)** VaR/ES  
-- **FHS (Filtered Historical Simulation)** VaR/ES using **time-varying volatility** (EWMA / RiskMetrics-style “GARCH-like” volatility)
+- **FHS (Filtered Historical Simulation)** VaR/ES using **time-varying volatility** (EWMA / RiskMetrics-style “GARCH-like” volatility)  
+- **MC-GARCH(1,1)-t** VaR/ES using a **Student-t** GARCH model and Monte Carlo simulation
 
-The goal is a realistic quant workflow: **data → returns → volatility model → Monte Carlo / resampling → VaR backtesting → plots**.
+Goal: a realistic quant workflow: **data → returns → volatility model → Monte Carlo / resampling → VaR/ES → backtesting → plots + tables**.
 
 ---
 
@@ -16,23 +17,24 @@ The goal is a realistic quant workflow: **data → returns → volatility model 
 - `notebooks/` — optional exploration (not required to reproduce results)
 - `reports/` — generated outputs (ignored by git)
 - `reports/figures/` — **tracked** key plots embedded in this README
+- `reports/tables/` — **tracked** key result tables (CSV)
 
 ---
 
 ## What this project does
 
-- Downloads daily price data (SPY, TLT, GLD) from Stooq (no API key)
-- Builds a simple portfolio (60% SPY, 30% TLT, 10% GLD)
-- Forecasts **1-day VaR at 97.5%** using:
-  - **HS:** quantile of historical returns
+- Downloads daily price data (**SPY, TLT, GLD**) from **Stooq** (no API key)
+- Builds a simple portfolio (**60% SPY, 30% TLT, 10% GLD**)
+- Forecasts **1-day VaR/ES at 97.5%** using:
+  - **HS:** quantile/tail mean of historical returns
   - **FHS:** standardise returns by volatility, resample shocks, scale by next-day volatility
+  - **MC-GARCH-t:** fit rolling **GARCH(1,1)** with **Student-t innovations**, simulate next-day distribution
 - Walk-forward backtest and produces:
-  - Realised P&L vs VaR thresholds
+  - Realised P&L vs VaR/ES thresholds
   - Rolling breach rate vs expected breach rate
+  - Summary tables + formal VaR backtests
 
 ---
-
-
 
 ## Results (latest run)
 
@@ -47,20 +49,28 @@ Empirical calibration (VaR exceptions):
 - **FHS (EWMA) breach rate:** **2.49%** (closest to expected)
 - **MC-GARCH(1,1)-t breach rate:** **2.78%**
 
-In this dataset, **FHS (EWMA)** is best calibrated to the target exception rate, while **MC-GARCH-t** produces a slightly higher exception rate.
-
-Full numeric summary:
+Full numeric summaries:
 - `reports/tables/backtest_summary.csv`
+- `reports/tables/var_backtests.csv`
 
-### Key figures
+---
 
-![P&L vs VaR](reports/figures/pnl_vs_var.png)
+## VaR backtesting (Kupiec & Christoffersen)
 
-![P&L vs VaR and ES](reports/figures/pnl_vs_var_es.png)
+Formal likelihood-ratio tests (p-values in `reports/tables/var_backtests.csv`):
 
-![Rolling breach](reports/figures/rolling_breach_rate.png)
+- **Kupiec LR_uc (unconditional coverage):** tests whether the exception rate matches the target \(1-\alpha\).
+- **Christoffersen LR_ind (independence):** tests whether exceptions are independent over time (no clustering).
+- **Conditional coverage LR_cc:** joint test of coverage + independence (LR_cc = LR_uc + LR_ind).
 
-### Key figures
+At the 5% level (**p < 0.05 ⇒ reject**):
+- All models pass **unconditional coverage** (FHS is strongest).
+- All models reject **independence**, indicating exception clustering.
+- HS fails **conditional coverage** most strongly; FHS and MC-GARCH-t improve but still reject conditional coverage.
+
+---
+
+## Key figures
 
 **Realised P&L vs VaR thresholds**
 ![P&L vs VaR](reports/figures/pnl_vs_var.png)
@@ -69,16 +79,6 @@ Full numeric summary:
 ![P&L vs VaR and ES](reports/figures/pnl_vs_var_es.png)
 
 **Rolling VaR breach rate**
-![Rolling breach](reports/figures/rolling_breach_rate.png)
-
-
-
-### Key figures
-
-**Realised P&L vs VaR thresholds**  
-![P&L vs VaR](reports/figures/pnl_vs_var.png)
-
-**Rolling VaR breach rate**  
 ![Rolling breach](reports/figures/rolling_breach_rate.png)
 
 ---
